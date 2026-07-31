@@ -23,6 +23,17 @@ on:
     - cron: "30 22 * * *"   # Hockey
     - cron: "0 23 * * *"    # NBA
   workflow_dispatch:         # te deja correrlo manualmente desde GitHub tambien
+    inputs:
+      deporte:
+        description: "Deporte a escanear ahora mismo (prueba manual)"
+        required: true
+        default: "FUTBOL"
+        type: choice
+        options:
+          - FUTBOL
+          - TENIS
+          - HOCKEY
+          - NBA
 
 jobs:
   scan:
@@ -47,7 +58,7 @@ jobs:
             "0 15 * * *")  echo "nombre=TENIS" >> "$GITHUB_OUTPUT" ;;
             "30 22 * * *") echo "nombre=HOCKEY" >> "$GITHUB_OUTPUT" ;;
             "0 23 * * *")  echo "nombre=NBA" >> "$GITHUB_OUTPUT" ;;
-            *) echo "nombre=" >> "$GITHUB_OUTPUT" ;;  # workflow_dispatch manual: revisa todos
+            *) echo "nombre=${{ github.event.inputs.deporte }}" >> "$GITHUB_OUTPUT" ;;
           esac
 
       - name: Ejecutar el scanner
