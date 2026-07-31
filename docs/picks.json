@@ -28,5 +28,20 @@
     "hora_inicio_evento": "2026-09-29 14:10",
     "resultado_real": "",
     "ganancia_perdida": ""
+  },
+  {
+    "fecha_hora_envio": "2026-07-31 16:49:24",
+    "deporte": "HOCKEY",
+    "evento": "Carolina Hurricanes vs Florida Panthers",
+    "resultado": "Over 6.5",
+    "cuota": "2.29",
+    "casa": "1xBet",
+    "prob_justa_pct": "46.5",
+    "edge_pct": "6.4",
+    "fraccion_bankroll_pct": "1.2",
+    "monto_sugerido": "6.19",
+    "hora_inicio_evento": "2026-09-29 14:10",
+    "resultado_real": "",
+    "ganancia_perdida": ""
   }
 ]
