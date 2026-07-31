@@ -1,1 +1,17 @@
-[]
+[
+  {
+    "fecha_hora_envio": "2026-07-31 16:31:53",
+    "deporte": "FUTBOL",
+    "evento": "Manchester City vs Bournemouth",
+    "resultado": "2.5",
+    "cuota": "2.90",
+    "casa": "William Hill",
+    "prob_justa_pct": "50.0",
+    "edge_pct": "45.0",
+    "fraccion_bankroll_pct": "3.0",
+    "monto_sugerido": "15.00",
+    "hora_inicio_evento": "2026-08-23 06:00",
+    "resultado_real": "",
+    "ganancia_perdida": ""
+  }
+]
