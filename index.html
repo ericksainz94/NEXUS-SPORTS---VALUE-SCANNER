@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Nexus Sports — Historial de Picks</title>
+<style>
+  :root{
+    --bg: #0d1321;
+    --panel: #141c2f;
+    --line: #253248;
+    --text: #dbe4f0;
+    --muted: #7c8aa5;
+    --amber: #e8a33d;
+    --green: #4caf78;
+    --red: #d16a6a;
+    --mono: 'IBM Plex Mono', 'Courier New', monospace;
+    --sans: 'Inter', -apple-system, sans-serif;
+  }
+  *{ box-sizing: border-box; }
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:var(--sans); line-height:1.5;
+  }
+  header{
+    padding: 48px 24px 32px; border-bottom:1px solid var(--line);
+    max-width: 980px; margin: 0 auto;
+  }
+  .eyebrow{
+    font-family:var(--mono); font-size:12px; letter-spacing:.14em;
+    color:var(--amber); text-transform:uppercase; margin:0 0 10px;
+  }
+  h1{ margin:0 0 12px; font-size: clamp(28px,4vw,40px); font-weight:700; }
+  .lede{ color:var(--muted); max-width: 620px; font-size:15px; }
+  .disclaimer{
+    margin-top:20px; padding:14px 16px; background:var(--panel);
+    border:1px solid var(--line); border-left:3px solid var(--amber);
+    font-size:13px; color:var(--muted); border-radius:4px;
+  }
+  main{ max-width: 980px; margin: 0 auto; padding: 32px 24px 80px; }
+  .stats{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+    gap:1px; background:var(--line); border:1px solid var(--line);
+    margin-bottom:36px; border-radius:6px; overflow:hidden;
+  }
+  .stat{ background:var(--panel); padding:18px 16px; }
+  .stat .n{ font-family:var(--mono); font-size:26px; font-weight:600; }
+  .stat .l{ font-size:12px; color:var(--muted); margin-top:4px; }
+  .stat.win .n{ color:var(--green); }
+  table{ width:100%; border-collapse:collapse; font-size:14px; }
+  thead th{
+    text-align:left; font-family:var(--mono); font-size:11px;
+    text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+    padding:10px 12px; border-bottom:1px solid var(--line);
+  }
+  tbody td{ padding:12px; border-bottom:1px solid var(--line); }
+  tbody tr:hover{ background: var(--panel); }
+  .edge{ font-family:var(--mono); color:var(--amber); }
+  .result-gano{ color:var(--green); font-weight:600; }
+  .result-perdio{ color:var(--red); font-weight:600; }
+  .result-pendiente{ color:var(--muted); }
+  .empty{ text-align:center; padding:60px 20px; color:var(--muted); }
+  footer{
+    max-width:980px; margin:0 auto; padding:24px; color:var(--muted);
+    font-size:12px; border-top:1px solid var(--line);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <p class="eyebrow">Radar de valor · registro publico</p>
+  <h1>Historial de picks</h1>
+  <p class="lede">
+    Cada fila es un pick real enviado por el sistema, con su cuota, su
+    probabilidad estimada de mercado y su resultado — bueno o malo. No se
+    ocultan los fallos.
+  </p>
+  <div class="disclaimer">
+    Esto no es una garantia de ganancias. Los picks se basan en comparar
+    cuotas entre casas de apuestas para detectar diferencias de mercado;
+    el margen estadistico esperado es de un pocos puntos porcentuales, no
+    certeza. Apostar conlleva riesgo real de perdida.
+  </div>
+</header>
+
+<main>
+  <div class="stats" id="stats"></div>
+  <table id="tabla">
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Deporte</th>
+        <th>Evento</th>
+        <th>Pick</th>
+        <th>Cuota</th>
+        <th>Edge</th>
+        <th>Resultado</th>
+      </tr>
+    </thead>
+    <tbody id="filas"></tbody>
+  </table>
+  <div class="empty" id="vacio" style="display:none;">
+    Aun no hay picks registrados. Vuelve despues del proximo escaneo.
+  </div>
+</main>
+
+<footer>
+  Nexus Sports — actualizado automaticamente por el escaneo programado.
+</footer>
+
+<script>
+async function cargar() {
+  let datos = [];
+  try {
+    const resp = await fetch('picks.json?_=' + Date.now());
+    datos = await resp.json();
+  } catch (e) {
+    document.getElementById('vacio').style.display = 'block';
+    document.getElementById('vacio').textContent = 'No se pudo cargar el historial.';
+    return;
+  }
+
+  if (!datos.length) {
+    document.getElementById('vacio').style.display = 'block';
+    return;
+  }
+
+  datos.sort((a, b) => (b.fecha_hora_envio || '').localeCompare(a.fecha_hora_envio || ''));
+
+  const total = datos.length;
+  const conResultado = datos.filter(d => (d.resultado_real || '').trim() !== '');
+  const ganados = conResultado.filter(d => (d.resultado_real || '').toUpperCase() === 'GANO');
+  const winrate = conResultado.length ? ((ganados.length / conResultado.length) * 100).toFixed(1) : '—';
+  let gananciaTotal = 0;
+  conResultado.forEach(d => { gananciaTotal += parseFloat(d.ganancia_perdida || '0') || 0; });
+
+  const statsEl = document.getElementById('stats');
+  statsEl.innerHTML = `
+    <div class="stat"><div class="n">${total}</div><div class="l">Picks enviados</div></div>
+    <div class="stat"><div class="n">${conResultado.length}</div><div class="l">Con resultado</div></div>
+    <div class="stat win"><div class="n">${winrate}${conResultado.length ? '%' : ''}</div><div class="l">Winrate real</div></div>
+    <div class="stat"><div class="n">${conResultado.length ? '$' + gananciaTotal.toFixed(2) : '—'}</div><div class="l">Ganancia / perdida</div></div>
+  `;
+
+  const filas = document.getElementById('filas');
+  filas.innerHTML = datos.map(d => {
+    const r = (d.resultado_real || '').toUpperCase();
+    const claseResultado = r === 'GANO' ? 'result-gano' : r === 'PERDIO' ? 'result-perdio' : 'result-pendiente';
+    const textoResultado = r || 'Pendiente';
+    return `<tr>
+      <td>${(d.fecha_hora_envio || '').split(' ')[0]}</td>
+      <td>${d.deporte || ''}</td>
+      <td>${d.evento || ''}</td>
+      <td>${d.resultado || ''}</td>
+      <td>${d.cuota || ''}</td>
+      <td class="edge">${d.edge_pct || ''}%</td>
+      <td class="${claseResultado}">${textoResultado}</td>
+    </tr>`;
+  }).join('');
+}
+cargar();
+</script>
+
+</body>
+</html>
