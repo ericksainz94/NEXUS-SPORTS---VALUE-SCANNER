@@ -140,12 +140,13 @@ class NexusSportsValue:
             return probabilidades
         return [p / total for p in probabilidades]
 
-    def calcular_probabilidad_justa_consenso(self, outcome_name, bookmakers, market_key):
+    def calcular_probabilidad_justa_consenso(self, nombre, punto, bookmakers, market_key):
         """
-        Junta las cuotas de un mismo resultado (ej: 'Over 2.5') en TODAS las
-        casas disponibles, quita el vig de cada casa por separado, y
-        promedia esas probabilidades "justas" entre casas para obtener un
-        consenso de mercado. Esto es mas robusto que confiar en una sola casa.
+        Junta las cuotas de un mismo resultado EXACTO (ej: nombre='Over',
+        punto=2.5) en todas las casas disponibles, quita el vig de cada
+        casa por separado, y promedia esas probabilidades "justas" entre
+        casas. Empareja por nombre Y punto juntos para no mezclar Over
+        con Under (o un hándicap con otro).
         """
         probabilidades_justas = []
         for bookmaker in bookmakers:
@@ -161,14 +162,14 @@ class NexusSportsValue:
                     continue
                 probs_justas = self.quitar_vig(probs_crudas)
                 for o, p_justa in zip(outcomes, probs_justas):
-                    if o.get("name") == outcome_name or str(o.get("point")) == str(outcome_name):
+                    if o.get("name") == nombre and o.get("point") == punto:
                         probabilidades_justas.append(p_justa)
 
         if not probabilidades_justas:
             return None
         return sum(probabilidades_justas) / len(probabilidades_justas)
 
-    def mejor_cuota_disponible(self, outcome_name, bookmakers, market_key):
+    def mejor_cuota_disponible(self, nombre, punto, bookmakers, market_key):
         mejor = None
         casa_mejor = None
         for bookmaker in bookmakers:
@@ -176,7 +177,7 @@ class NexusSportsValue:
                 if market.get("key") != market_key:
                     continue
                 for o in market.get("outcomes", []):
-                    if o.get("name") == outcome_name or str(o.get("point")) == str(outcome_name):
+                    if o.get("name") == nombre and o.get("point") == punto:
                         precio = o.get("price")
                         if precio and (mejor is None or precio > mejor):
                             mejor = precio
@@ -330,27 +331,32 @@ class NexusSportsValue:
             equipo_local = evento.get('home_team', 'Local')
             equipo_visita = evento.get('away_team', 'Visita')
 
-            # Juntamos todos los nombres de resultado distintos que aparecen
-            nombres_resultado = set()
+            # Juntamos todos los resultados distintos (nombre + punto juntos,
+            # ej: ('Over', 2.5) y ('Under', 2.5) por separado, nunca mezclados)
+            resultados_posibles = set()
             for bookmaker in bookmakers:
                 for market in bookmaker.get("markets", []):
                     if market.get("key") != market_key:
                         continue
                     for o in market.get("outcomes", []):
-                        nombres_resultado.add(o.get("name") if market_key != "totals" else str(o.get("point")))
+                        resultados_posibles.add((o.get("name"), o.get("point")))
 
-            for nombre_resultado in nombres_resultado:
-                if nombre_resultado is None:
+            for nombre, punto in resultados_posibles:
+                if nombre is None:
                     continue
-                prob_justa = self.calcular_probabilidad_justa_consenso(nombre_resultado, bookmakers, market_key)
+                prob_justa = self.calcular_probabilidad_justa_consenso(nombre, punto, bookmakers, market_key)
                 if prob_justa is None:
                     continue
-                mejor_cuota, casa = self.mejor_cuota_disponible(nombre_resultado, bookmakers, market_key)
+                mejor_cuota, casa = self.mejor_cuota_disponible(nombre, punto, bookmakers, market_key)
                 if mejor_cuota is None:
                     continue
 
                 # Valor esperado de apostar 1 unidad a la mejor cuota disponible
                 ev = (mejor_cuota * prob_justa) - 1
+
+                # Etiqueta clara para el mensaje: "Over 2.5", "Under 2.5",
+                # "Manchester City -1.5", o solo el nombre si no hay punto (h2h)
+                etiqueta_resultado = f"{nombre} {punto}" if punto is not None else nombre
 
                 if ev >= EDGE_MINIMO:
                     fraccion_bankroll = self.kelly_fraccionado(prob_justa, mejor_cuota)
@@ -358,7 +364,7 @@ class NexusSportsValue:
                         continue
                     mejores_picks.append({
                         "evento": f"{equipo_local} vs {equipo_visita}",
-                        "resultado": nombre_resultado,
+                        "resultado": etiqueta_resultado,
                         "cuota": mejor_cuota,
                         "casa": casa,
                         "prob_justa": prob_justa,
