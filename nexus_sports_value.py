@@ -3,7 +3,7 @@ import time
 import csv
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import pytz
 
 # ======================================================================
@@ -54,6 +54,20 @@ FRACCION_KELLY = 0.25
 # Tope duro de bankroll por apuesta, pase lo que pase con Kelly
 MAX_PORCENTAJE_BANKROLL = 0.03  # 3% maximo
 
+# Umbral minimo de edge para un PARLAY de 2 patas (mas alto que el de picks
+# individuales, porque combinar dos apuestas acumula incertidumbre: estamos
+# asumiendo independencia entre los dos eventos y estimando la cuota
+# combinada, no leyendola directo de una casa. Mas margen de seguridad.
+EDGE_MINIMO_PARLAY = 0.05
+
+# Ventana de horas hacia adelante en la que un partido se considera "real y
+# operable" ahora (24-48h es prudente: como cada deporte se revisa una vez
+# al dia, esto es suficiente para agarrar los partidos de hoy/mañana sin
+# tomar partidos de pretemporada o de una temporada que ni ha arrancado,
+# que la API a veces lista con mucha anticipacion pero que no son
+# apostables todavia en la practica.
+VENTANA_HORAS_MAXIMO = 48
+
 BANKROLL_INICIAL = 500.0
 
 # Archivo donde se guarda el historial de picks para que puedas medir tu
@@ -70,9 +84,24 @@ LOG_HEADERS = [
     "ganancia_perdida",     # LLENAR TU: monto real +/- despues del partido
 ]
 
+# Archivo separado para el historial de parlays (2 patas), con su propia
+# probabilidad combinada y cuota combinada.
+PARLAY_CSV = os.path.join(os.path.dirname(os.path.abspath(__file__)), "parlays_log.csv")
+PARLAY_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "docs", "parlays.json")
+PARLAY_HEADERS = [
+    "fecha", "pierna_1", "pick_1", "cuota_1", "pierna_2", "pick_2", "cuota_2",
+    "prob_combinada_pct", "cuota_combinada_estimada", "edge_estimado_pct",
+    "resultado_real", "ganancia_perdida",
+]
+
+# Los 4 deportes activos. Cada uno se revisa en su horario; si no hay
+# partidos o no hay valor ese dia, simplemente no se envia nada ese
+# deporte ese dia -- no es necesario "activarlos" cada vez.
+# El parlay (mas abajo) SOLO combina Futbol + NBA, sin importar que estos
+# 4 esten activos -- eso es una eleccion deliberada, no una limitacion tecnica.
 DEPORTES = {
     "FUTBOL":  {"sport_key": "soccer_epl",       "market": "totals",  "hora": "07:30", "emoji": "⚽"},
-    "TENIS":   {"sport_key": "tennis_atp",        "market": "h2h",      "hora": "08:00", "emoji": "🎾"},
+    "TENIS":   {"sport_key": "tennis_atp",        "market": "h2h",     "hora": "08:00", "emoji": "🎾"},
     "HOCKEY":  {"sport_key": "icehockey_nhl",     "market": "totals",  "hora": "15:30", "emoji": "🏒"},
     "NBA":     {"sport_key": "basketball_nba",    "market": "totals",  "hora": "16:00", "emoji": "🏀"},
 }
@@ -85,6 +114,7 @@ class NexusSportsValue:
         self.chat_id = CHAT_ID
         self.last_update_id = -1
         self.alarmas_enviadas = {d: False for d in DEPORTES}
+        self.parlay_enviado_hoy = False
         self.bankroll = BANKROLL_INICIAL
         self.picks_log = []  # guardamos cada pick para que puedas revisar despues
 
@@ -311,6 +341,7 @@ class NexusSportsValue:
             return
 
         ahora_utc = datetime.now(pytz.UTC)
+        ventana_maxima = ahora_utc + timedelta(hours=VENTANA_HORAS_MAXIMO)
         mejores_picks = []
 
         for evento in datos:
@@ -323,6 +354,8 @@ class NexusSportsValue:
                 continue
             if tiempo_inicio <= ahora_utc:
                 continue  # ya empezo, no sirve
+            if tiempo_inicio > ventana_maxima:
+                continue  # muy lejano (pretemporada / temporada que ni arranca), no es real todavia
 
             bookmakers = evento.get("bookmakers", [])
             if len(bookmakers) < 2:
@@ -379,7 +412,7 @@ class NexusSportsValue:
                 f"por encima del {EDGE_MINIMO*100:.0f}% hoy. No se envia pick — "
                 f"es preferible no apostar a forzar uno sin valor real."
             )
-            return
+            return None
 
         # Ordenamos por edge y mandamos el mejor (puedes cambiar a [:2] si quieres mas de uno)
         mejores_picks.sort(key=lambda x: x["edge"], reverse=True)
@@ -403,6 +436,157 @@ class NexusSportsValue:
         self.picks_log.append(pick)
         self.registrar_pick_csv(deporte, pick, monto)
         self.actualizar_json_web()
+        pick["deporte"] = deporte
+        return pick
+
+    # ------------------------------------------------------------------
+    # Parlay de 2 patas (SOLO combina picks que YA pasaron el filtro de
+    # valor individualmente. Nunca busca "que sume x2/x3": calcula la
+    # probabilidad combinada real y solo avisa si el parlay sigue
+    # teniendo edge positivo despues de combinar. Si no lo tiene, te lo
+    # dice tambien -- no lo oculta.
+    # ------------------------------------------------------------------
+    def leer_pick_de_hoy(self, deporte):
+        """Busca en el CSV el pick mas reciente de HOY para ese deporte,
+        siempre y cuando el partido todavia no haya empezado."""
+        if not os.path.isfile(LOG_CSV):
+            return None
+        hoy_str = datetime.now(ZONA_HORARIA).strftime("%Y-%m-%d")
+        ahora = datetime.now(ZONA_HORARIA)
+        try:
+            with open(LOG_CSV, mode="r", encoding="utf-8") as f:
+                filas = list(csv.DictReader(f))
+        except Exception:
+            return None
+
+        candidatos = []
+        for fila in filas:
+            if not fila.get("fecha_hora_envio", "").startswith(hoy_str):
+                continue
+            if fila.get("deporte") != deporte:
+                continue
+            try:
+                hora_inicio = ZONA_HORARIA.localize(
+                    datetime.strptime(fila["hora_inicio_evento"], "%Y-%m-%d %H:%M")
+                )
+            except Exception:
+                continue
+            if hora_inicio <= ahora:
+                continue  # el partido de esa fila ya empezo, no sirve para parlay
+            candidatos.append(fila)
+
+        if not candidatos:
+            return None
+        return candidatos[-1]  # el mas reciente registrado hoy
+
+    def evaluar_parlay_del_dia(self):
+        """
+        Combina el pick de FUTBOL y el de NBA de HOY (si ambos existen y
+        ambos partidos siguen sin empezar). Calcula la probabilidad
+        combinada real (multiplicando las probabilidades justas,
+        asumiendo independencia -- son deportes y partidos distintos) y
+        la cuota combinada estimada (multiplicando las mejores cuotas).
+        Solo avisa si el edge combinado sigue por encima de
+        EDGE_MINIMO_PARLAY. Si no hay 2 patas disponibles o no conviene
+        combinarlas, tambien lo dice claramente -- nunca fuerza un parlay.
+        """
+        pierna_futbol = self.leer_pick_de_hoy("FUTBOL")
+        pierna_nba = self.leer_pick_de_hoy("NBA")
+
+        if not pierna_futbol or not pierna_nba:
+            faltantes = []
+            if not pierna_futbol:
+                faltantes.append("Futbol")
+            if not pierna_nba:
+                faltantes.append("NBA")
+            self.send_msg(
+                f"📭 *PARLAY*: hoy no hay pick individual disponible de "
+                f"{' y '.join(faltantes)}, asi que no hay 2 patas que combinar. "
+                f"Sin parlay hoy — es preferible eso a forzar una combinacion sin base."
+            )
+            return
+
+        try:
+            prob1 = float(pierna_futbol["prob_justa_pct"]) / 100
+            cuota1 = float(pierna_futbol["cuota"])
+            prob2 = float(pierna_nba["prob_justa_pct"]) / 100
+            cuota2 = float(pierna_nba["cuota"])
+        except (KeyError, ValueError):
+            return
+
+        # Probabilidad combinada real (asumiendo independencia entre los
+        # dos eventos -- razonable porque son deportes y partidos distintos)
+        prob_combinada = prob1 * prob2
+
+        # Cuota combinada ESTIMADA por multiplicacion simple. Aviso real:
+        # muchas casas aplican un margen extra en parlays por encima de
+        # esto, asi que la cuota que te ofrezca tu casa puede ser un poco
+        # menor -- este numero es un techo, no una promesa.
+        cuota_combinada_estimada = cuota1 * cuota2
+
+        edge_parlay = (cuota_combinada_estimada * prob_combinada) - 1
+
+        mensaje_base = (
+            f"🎲 *PARLAY DE 2 PATAS - ANALISIS DE HOY*\n\n"
+            f"1️⃣ ⚽ {pierna_futbol['evento']} — {pierna_futbol['resultado']} @ {cuota1:.2f}\n"
+            f"2️⃣ 🏀 {pierna_nba['evento']} — {pierna_nba['resultado']} @ {cuota2:.2f}\n\n"
+            f"📐 Probabilidad combinada real (ambas patas): {prob_combinada*100:.1f}%\n"
+            f"🏦 Cuota combinada estimada: {cuota_combinada_estimada:.2f} "
+            f"(techo — tu casa puede pagar un poco menos por margen de parlay)\n"
+        )
+
+        if edge_parlay >= EDGE_MINIMO_PARLAY:
+            monto_parlay = self.bankroll * MAX_PORCENTAJE_BANKROLL  # tope fijo, sin Kelly compuesto aqui
+            mensaje = mensaje_base + (
+                f"📈 Edge estimado del parlay: {edge_parlay*100:.1f}%\n"
+                f"💰 Si decides jugarlo, no mas de {MAX_PORCENTAJE_BANKROLL*100:.0f}% del bankroll "
+                f"≈ ${monto_parlay:.2f}\n\n"
+                f"⚠️ IMPORTANTE: esto es una ALTERNATIVA a jugar las 2 patas por separado, "
+                f"no una apuesta adicional. Si ya apostaste alguna de las 2 individualmente, "
+                f"NO la vuelvas a meter aqui — estarias arriesgando el doble en el mismo resultado.\n"
+                f"La varianza de un parlay es mucho mayor que la de picks individuales, "
+                f"aun cuando el edge calculado sea positivo."
+            )
+            self.registrar_parlay_csv(pierna_futbol, pierna_nba, cuota1, cuota2, prob_combinada, cuota_combinada_estimada, edge_parlay)
+            self.actualizar_json_parlay_web()
+        else:
+            mensaje = mensaje_base + (
+                f"📈 Edge estimado del parlay: {edge_parlay*100:.1f}% (por debajo del "
+                f"{EDGE_MINIMO_PARLAY*100:.0f}% minimo)\n\n"
+                f"🙅 No conviene combinarlas hoy. Cada pata individual ya tenia valor por "
+                f"separado — quedate con esas por separado en vez de combinarlas."
+            )
+
+        self.send_msg(mensaje)
+
+    def registrar_parlay_csv(self, pierna1, pierna2, cuota1, cuota2, prob_combinada, cuota_combinada, edge):
+        archivo_existe = os.path.isfile(PARLAY_CSV)
+        try:
+            with open(PARLAY_CSV, mode="a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if not archivo_existe:
+                    writer.writerow(PARLAY_HEADERS)
+                writer.writerow([
+                    datetime.now(ZONA_HORARIA).strftime("%Y-%m-%d %H:%M:%S"),
+                    pierna1["evento"], pierna1["resultado"], f"{cuota1:.2f}",
+                    pierna2["evento"], pierna2["resultado"], f"{cuota2:.2f}",
+                    f"{prob_combinada*100:.1f}", f"{cuota_combinada:.2f}", f"{edge*100:.1f}",
+                    "", "",  # resultado_real, ganancia_perdida -- los llenas tu
+                ])
+        except Exception as e:
+            print(f"Error escribiendo parlay en CSV: {e}")
+
+    def actualizar_json_parlay_web(self):
+        if not os.path.isfile(PARLAY_CSV):
+            return
+        try:
+            with open(PARLAY_CSV, mode="r", encoding="utf-8") as f:
+                filas = list(csv.DictReader(f))
+            os.makedirs(os.path.dirname(PARLAY_JSON), exist_ok=True)
+            with open(PARLAY_JSON, mode="w", encoding="utf-8") as f:
+                json.dump(filas, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Error actualizando JSON de parlays: {e}")
 
     # ------------------------------------------------------------------
     # Programacion horaria
@@ -412,23 +596,31 @@ class NexusSportsValue:
 
         if ahora == "00:00":
             self.alarmas_enviadas = {d: False for d in DEPORTES}
+            self.parlay_enviado_hoy = False
 
         for deporte, config in DEPORTES.items():
             if ahora == config["hora"] and not self.alarmas_enviadas[deporte]:
                 self.escanear_deporte(deporte)
                 self.alarmas_enviadas[deporte] = True
 
+        # Evalua el parlay 10 minutos despues del ultimo escaneo del dia (NBA)
+        if ahora == "16:10" and not getattr(self, "parlay_enviado_hoy", False):
+            self.evaluar_parlay_del_dia()
+            self.parlay_enviado_hoy = True
+
     def ejecutar_una_vez(self, deporte=None):
         """
         Modo para ejecucion programada (ej: GitHub Actions cron).
-        Si se especifica 'deporte', escanea solo ese. Si no, escanea todos
-        los que correspondan a la hora actual (util si corres el workflow
-        una vez al dia y quieres que revise el horario el mismo).
+        Si se especifica 'deporte', escanea solo ese (o evalua el parlay
+        si el valor es 'PARLAY'). Si no se especifica nada, revisa todos
+        los horarios que correspondan a la hora actual.
         """
         self.revisar_comandos()
         if deporte:
             deporte = deporte.upper()
-            if deporte in DEPORTES:
+            if deporte == "PARLAY":
+                self.evaluar_parlay_del_dia()
+            elif deporte in DEPORTES:
                 self.escanear_deporte(deporte)
             else:
                 print(f"Deporte desconocido: {deporte}")
@@ -443,7 +635,7 @@ class NexusSportsValue:
             "Compara cuotas reales entre casas y solo avisa si hay valor estadistico genuino.\n"
             "Si un deporte no tiene edge ese dia, no se envia nada — es lo esperado, no un error.\n\n"
             "Horarios:\n"
-            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏒 15:30 Hockey\n🏀 16:00 NBA\n\n"
+            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏒 15:30 Hockey\n🏀 16:00 NBA\n🎲 16:10 Analisis de parlay (Futbol+NBA, si aplica)\n\n"
             "Comandos: STATUS (estado actual) | LOG (resumen de tu historial de picks)"
         )
         while True:
