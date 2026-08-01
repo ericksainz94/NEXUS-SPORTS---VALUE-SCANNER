@@ -82,3 +82,4 @@ jobs:
           git add picks_log.csv parlays_log.csv docs/picks.json docs/parlays.json || true
           git diff --staged --quiet || git commit -m "Actualiza historial de picks/parlays [automatico]"
           git push
+
