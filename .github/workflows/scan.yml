@@ -11,10 +11,14 @@ name: Nexus Sports Value Scanner
 #   08:00 hora Mazatlan -> 15:00 UTC (Tenis)
 #   15:30 hora Mazatlan -> 22:30 UTC (Hockey)
 #   16:00 hora Mazatlan -> 23:00 UTC (NBA)
+#   16:10 hora Mazatlan -> 23:10 UTC (Analisis de parlay, solo Futbol+NBA)
 #
 # NOTA: GitHub Actions no garantiza el minuto EXACTO en horas pico (puede
 # atrasarse unos minutos). Para algo tan sensible a horarios de inicio de
 # partido, calcula con margen.
+#
+# Si un deporte no tiene partidos o no tiene valor ese dia, simplemente no
+# se envia nada de ese deporte ese dia -- eso es lo esperado, no un error.
 
 on:
   schedule:
@@ -22,10 +26,11 @@ on:
     - cron: "0 15 * * *"    # Tenis
     - cron: "30 22 * * *"   # Hockey
     - cron: "0 23 * * *"    # NBA
+    - cron: "10 23 * * *"   # Analisis de parlay (Futbol + NBA de hoy)
   workflow_dispatch:         # te deja correrlo manualmente desde GitHub tambien
     inputs:
       deporte:
-        description: "Deporte a escanear ahora mismo (prueba manual)"
+        description: "Que forzar ahora mismo (prueba manual)"
         required: true
         default: "FUTBOL"
         type: choice
@@ -34,6 +39,7 @@ on:
           - TENIS
           - HOCKEY
           - NBA
+          - PARLAY
 
 jobs:
   scan:
@@ -50,7 +56,7 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests pytz
 
-      - name: Determinar que deporte corresponde a este horario
+      - name: Determinar que corresponde a este horario
         id: deporte
         run: |
           case "${{ github.event.schedule }}" in
@@ -58,7 +64,8 @@ jobs:
             "0 15 * * *")  echo "nombre=TENIS" >> "$GITHUB_OUTPUT" ;;
             "30 22 * * *") echo "nombre=HOCKEY" >> "$GITHUB_OUTPUT" ;;
             "0 23 * * *")  echo "nombre=NBA" >> "$GITHUB_OUTPUT" ;;
-            *) echo "nombre=${{ github.event.inputs.deporte }}" >> "$GITHUB_OUTPUT" ;;
+            "10 23 * * *") echo "nombre=PARLAY" >> "$GITHUB_OUTPUT" ;;
+            *) echo "nombre=${{ github.event.inputs.deporte }}" >> "$GITHUB_OUTPUT" ;;  # prueba manual
           esac
 
       - name: Ejecutar el scanner
@@ -72,6 +79,6 @@ jobs:
         run: |
           git config user.name "nexus-bot"
           git config user.email "nexus-bot@users.noreply.github.com"
-          git add picks_log.csv docs/picks.json || true
-          git diff --staged --quiet || git commit -m "Actualiza historial de picks [automatico]"
+          git add picks_log.csv parlays_log.csv docs/picks.json docs/parlays.json || true
+          git diff --staged --quiet || git commit -m "Actualiza historial de picks/parlays [automatico]"
           git push
