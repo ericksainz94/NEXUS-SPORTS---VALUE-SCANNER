@@ -103,6 +103,30 @@
   <div class="empty" id="vacio" style="display:none;">
     Aun no hay picks registrados. Vuelve despues del proximo escaneo.
   </div>
+
+  <h2 style="margin-top:56px; font-size:20px;">Parlays de 2 patas</h2>
+  <p class="lede" style="margin-bottom:20px;">
+    Solo se arman con picks que ya tenían valor individual. Se muestran
+    aunque el edge combinado haya sido negativo ese día, para que veas
+    también cuando NO convino combinarlos.
+  </p>
+  <table id="tabla-parlays">
+    <thead>
+      <tr>
+        <th>Fecha</th>
+        <th>Pata 1</th>
+        <th>Pata 2</th>
+        <th>Prob. combinada</th>
+        <th>Cuota combinada</th>
+        <th>Edge</th>
+        <th>Resultado</th>
+      </tr>
+    </thead>
+    <tbody id="filas-parlays"></tbody>
+  </table>
+  <div class="empty" id="vacio-parlays" style="display:none;">
+    Aun no hay parlays registrados.
+  </div>
 </main>
 
 <footer>
@@ -160,6 +184,38 @@ async function cargar() {
   }).join('');
 }
 cargar();
+
+async function cargarParlays() {
+  let datos = [];
+  try {
+    const resp = await fetch('parlays.json?_=' + Date.now());
+    datos = await resp.json();
+  } catch (e) {
+    document.getElementById('vacio-parlays').style.display = 'block';
+    return;
+  }
+  if (!datos.length) {
+    document.getElementById('vacio-parlays').style.display = 'block';
+    return;
+  }
+  datos.sort((a, b) => (b.fecha || '').localeCompare(a.fecha || ''));
+  const filasParlays = document.getElementById('filas-parlays');
+  filasParlays.innerHTML = datos.map(d => {
+    const r = (d.resultado_real || '').toUpperCase();
+    const claseResultado = r === 'GANO' ? 'result-gano' : r === 'PERDIO' ? 'result-perdio' : 'result-pendiente';
+    const textoResultado = r || 'Pendiente';
+    return `<tr>
+      <td>${(d.fecha || '').split(' ')[0]}</td>
+      <td>${d.pierna_1 || ''}<br><span class="edge">${d.pick_1 || ''} @ ${d.cuota_1 || ''}</span></td>
+      <td>${d.pierna_2 || ''}<br><span class="edge">${d.pick_2 || ''} @ ${d.cuota_2 || ''}</span></td>
+      <td>${d.prob_combinada_pct || ''}%</td>
+      <td>${d.cuota_combinada_estimada || ''}</td>
+      <td class="edge">${d.edge_estimado_pct || ''}%</td>
+      <td class="${claseResultado}">${textoResultado}</td>
+    </tr>`;
+  }).join('');
+}
+cargarParlays();
 </script>
 
 </body>
