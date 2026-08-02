@@ -1,36 +1,21 @@
 name: Nexus Sports Value Scanner
 
-# Corre el bot en los horarios de cada deporte SIN necesidad de servidor
-# propio ni que tu compu este prendida. Los horarios estan en UTC porque
-# GitHub Actions no entiende zonas horarias directamente.
-#
-# America/Mazatlan = UTC-7 todo el año (Sinaloa ya no cambia de horario).
-# Si tu horario cambia, ajusta aqui restando/sumando a la hora UTC.
-#
-#   07:30 hora Mazatlan -> 14:30 UTC (Futbol)
-#   08:00 hora Mazatlan -> 15:00 UTC (Tenis)
-#   15:30 hora Mazatlan -> 22:30 UTC (Hockey)
-#   16:00 hora Mazatlan -> 23:00 UTC (NBA)
-#   16:10 hora Mazatlan -> 23:10 UTC (Analisis de parlay, solo Futbol+NBA)
-#
-# NOTA: GitHub Actions no garantiza el minuto EXACTO en horas pico (puede
-# atrasarse unos minutos). Para algo tan sensible a horarios de inicio de
-# partido, calcula con margen.
+# Los horarios ya NO los maneja el cron nativo de GitHub (resulto ser poco
+# confiable para este repo -- se quedaba "pegado" a horarios viejos en vez
+# de disparar en los horarios reales configurados). En su lugar, un
+# servicio externo gratuito (cron-job.org) llama a este workflow a la hora
+# exacta via la API de GitHub (workflow_dispatch), pasando el deporte
+# correspondiente. Ver cron-job.org para los 5 horarios configurados:
+# Futbol, Tenis, Hockey, NBA, y el analisis de Parlay.
 #
 # Si un deporte no tiene partidos o no tiene valor ese dia, simplemente no
 # se envia nada de ese deporte ese dia -- eso es lo esperado, no un error.
 
 on:
-  schedule:
-    - cron: "30 14 * * *"   # Futbol
-    - cron: "0 15 * * *"    # Tenis
-    - cron: "30 22 * * *"   # Hockey
-    - cron: "0 23 * * *"    # NBA
-    - cron: "10 23 * * *"   # Analisis de parlay (Futbol + NBA de hoy)
-  workflow_dispatch:         # te deja correrlo manualmente desde GitHub tambien
+  workflow_dispatch:
     inputs:
       deporte:
-        description: "Que forzar ahora mismo (prueba manual)"
+        description: "Que deporte/analisis correr (lo manda cron-job.org, o pruébalo manual aquí)"
         required: true
         default: "FUTBOL"
         type: choice
@@ -56,24 +41,12 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests pytz
 
-      - name: Determinar que corresponde a este horario
-        id: deporte
-        run: |
-          case "${{ github.event.schedule }}" in
-            "30 14 * * *") echo "nombre=FUTBOL" >> "$GITHUB_OUTPUT" ;;
-            "0 15 * * *")  echo "nombre=TENIS" >> "$GITHUB_OUTPUT" ;;
-            "30 22 * * *") echo "nombre=HOCKEY" >> "$GITHUB_OUTPUT" ;;
-            "0 23 * * *")  echo "nombre=NBA" >> "$GITHUB_OUTPUT" ;;
-            "10 23 * * *") echo "nombre=PARLAY" >> "$GITHUB_OUTPUT" ;;
-            *) echo "nombre=${{ github.event.inputs.deporte }}" >> "$GITHUB_OUTPUT" ;;  # prueba manual
-          esac
-
       - name: Ejecutar el scanner
         env:
           TOKEN_TG: ${{ secrets.TOKEN_TG }}
           API_KEY_ODDS: ${{ secrets.API_KEY_ODDS }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
-        run: python nexus_sports_value.py once ${{ steps.deporte.outputs.nombre }}
+        run: python nexus_sports_value.py once ${{ github.event.inputs.deporte }}
 
       - name: Guardar historial actualizado (CSV + JSON para la web)
         run: |
@@ -82,7 +55,3 @@ jobs:
           git add picks_log.csv parlays_log.csv docs/picks.json docs/parlays.json || true
           git diff --staged --quiet || git commit -m "Actualiza historial de picks/parlays [automatico]"
           git push
-
-
-          
-
