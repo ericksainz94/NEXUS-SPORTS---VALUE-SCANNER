@@ -24,7 +24,9 @@ on:
           - TENIS
           - HOCKEY
           - NBA
+          - NFL
           - PARLAY
+          - SPORTS
 
 jobs:
   scan:
