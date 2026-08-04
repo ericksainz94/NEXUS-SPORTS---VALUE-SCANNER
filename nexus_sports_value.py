@@ -4,6 +4,7 @@ import csv
 import json
 import os
 from datetime import datetime, timedelta
+from itertools import combinations
 import pytz
 
 # ======================================================================
@@ -94,17 +95,41 @@ PARLAY_HEADERS = [
     "resultado_real", "ganancia_perdida",
 ]
 
-# Los 4 deportes activos. Cada uno se revisa en su horario; si no hay
+# Los deportes activos. Cada uno se revisa en su horario; si no hay
 # partidos o no hay valor ese dia, simplemente no se envia nada ese
 # deporte ese dia -- no es necesario "activarlos" cada vez.
-# El parlay (mas abajo) SOLO combina Futbol + NBA, sin importar que estos
-# 4 esten activos -- eso es una eleccion deliberada, no una limitacion tecnica.
+# El parlay (mas abajo) combina Futbol + NBA + NFL (los que tengan pick
+# ese dia) -- Tenis y Hockey no entran al parlay, eso es deliberado.
+#
+# "sport_key" puede ser un solo string O una lista de strings -- si es
+# lista, el bot busca partidos en TODAS esas ligas y evalua el mejor pick
+# entre todas juntas. Util para futbol, que tiene muchas ligas con
+# calendarios distintos (mientras una esta de descanso, otra puede estar
+# en plena temporada).
 DEPORTES = {
-    "FUTBOL":  {"sport_key": "soccer_epl",       "market": "totals",  "hora": "07:30", "emoji": "⚽"},
+    "FUTBOL": {
+        "sport_key": [
+            "soccer_epl",                 # Premier League (Inglaterra)
+            "soccer_spain_la_liga",       # La Liga (España)
+            "soccer_mexico_ligamx",       # Liga MX -- activa en Agosto (Apertura)
+            "soccer_uefa_champs_league",  # Champions League (cuando este activa)
+        ],
+        "market": "totals", "hora": "07:30", "emoji": "⚽",
+    },
+    # OJO: "tennis_atp" es un valor PENDIENTE de confirmar -- corre
+    # "python nexus_sports_value.py once SPORTS" para ver la clave real
+    # que tu plan de API soporta, y actualiza esto si es distinta.
     "TENIS":   {"sport_key": "tennis_atp",        "market": "h2h",     "hora": "08:00", "emoji": "🎾"},
     "HOCKEY":  {"sport_key": "icehockey_nhl",     "market": "totals",  "hora": "15:30", "emoji": "🏒"},
     "NBA":     {"sport_key": "basketball_nba",    "market": "totals",  "hora": "16:00", "emoji": "🏀"},
+    # NFL: la temporada arranca pronto. "spreads" (linea de puntos) es el
+    # mercado estandar de NFL, mas liquido que h2h para la mayoria de partidos.
+    "NFL":     {"sport_key": "americanfootball_nfl", "market": "spreads", "hora": "09:00", "emoji": "🏈"},
 }
+
+# Deportes que SI pueden combinarse en el parlay de 2 patas (ver
+# evaluar_parlay_del_dia). Tenis y Hockey quedan fuera deliberadamente.
+DEPORTES_PARLAY = ["FUTBOL", "NBA", "NFL"]
 
 
 class NexusSportsValue:
@@ -319,26 +344,36 @@ class NexusSportsValue:
     # ------------------------------------------------------------------
     def escanear_deporte(self, deporte):
         config = DEPORTES[deporte]
-        sport_key = config["sport_key"]
+        sport_keys = config["sport_key"]
+        if isinstance(sport_keys, str):
+            sport_keys = [sport_keys]
         market_key = config["market"]
 
-        url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
-               f"?apiKey={self.api_key}&regions=us,eu&markets={market_key}&oddsFormat=decimal")
+        # Juntamos los eventos de TODAS las ligas configuradas para este
+        # deporte (ej: futbol junta EPL + La Liga + Liga MX + Champions).
+        # Marcamos cada evento con su liga de origen para el mensaje final.
+        datos = []
+        ligas_con_error = []
+        for sport_key in sport_keys:
+            url = (f"https://api.the-odds-api.com/v4/sports/{sport_key}/odds/"
+                   f"?apiKey={self.api_key}&regions=us,eu&markets={market_key}&oddsFormat=decimal")
+            try:
+                resp = requests.get(url, timeout=10)
+                datos_liga = resp.json()
+            except Exception:
+                ligas_con_error.append(sport_key)
+                continue
+            if resp.status_code != 200 or not isinstance(datos_liga, list):
+                ligas_con_error.append(sport_key)
+                continue
+            for evento in datos_liga:
+                evento["_liga"] = sport_key
+            datos.extend(datos_liga)
 
-        try:
-            resp = requests.get(url, timeout=10)
-            datos = resp.json()
-        except Exception as e:
-            self.send_msg(f"⚠️ {config['emoji']} {deporte}: error consultando la API ({e}).")
-            return
-
-        if resp.status_code != 200 or not isinstance(datos, list):
-            self.send_msg(f"⚠️ {config['emoji']} {deporte}: la API no devolvio datos validos.")
-            return
-
-        if len(datos) == 0:
-            self.send_msg(f"📭 {config['emoji']} {deporte}: no hay eventos disponibles ahorita.")
-            return
+        if not datos:
+            detalle = f" (fallaron: {', '.join(ligas_con_error)})" if ligas_con_error else ""
+            self.send_msg(f"📭 {config['emoji']} {deporte}: no hay eventos disponibles ahorita{detalle}.")
+            return None
 
         ahora_utc = datetime.now(pytz.UTC)
         ventana_maxima = ahora_utc + timedelta(hours=VENTANA_HORAS_MAXIMO)
@@ -404,6 +439,7 @@ class NexusSportsValue:
                         "edge": ev,
                         "fraccion_bankroll": fraccion_bankroll,
                         "hora_inicio": tiempo_inicio,
+                        "liga": evento.get("_liga", ""),
                     })
 
         if not mejores_picks:
@@ -421,7 +457,7 @@ class NexusSportsValue:
 
         mensaje = (
             f"{config['emoji']} *PICK CON VALOR DETECTADO - {deporte}*\n\n"
-            f"🆚 {pick['evento']}\n"
+            f"🆚 {pick['evento']}" + (f" _(liga: {pick['liga']})_\n" if pick.get('liga') else "\n") +
             f"🎯 Resultado: {pick['resultado']}\n"
             f"🏦 Mejor cuota: {pick['cuota']:.2f} (casa: {pick['casa']})\n"
             f"📐 Probabilidad justa de mercado (consenso, sin vig): {pick['prob_justa']*100:.1f}%\n"
@@ -481,64 +517,70 @@ class NexusSportsValue:
 
     def evaluar_parlay_del_dia(self):
         """
-        Combina el pick de FUTBOL y el de NBA de HOY (si ambos existen y
-        ambos partidos siguen sin empezar). Calcula la probabilidad
-        combinada real (multiplicando las probabilidades justas,
-        asumiendo independencia -- son deportes y partidos distintos) y
-        la cuota combinada estimada (multiplicando las mejores cuotas).
-        Solo avisa si el edge combinado sigue por encima de
-        EDGE_MINIMO_PARLAY. Si no hay 2 patas disponibles o no conviene
-        combinarlas, tambien lo dice claramente -- nunca fuerza un parlay.
+        Junta los picks de HOY de los deportes en DEPORTES_PARLAY (Futbol,
+        NBA, NFL -- los que hayan dado pick ese dia y cuyo partido siga sin
+        empezar). Si hay 2 o mas disponibles, evalua TODAS las combinaciones
+        posibles de 2 patas y manda la de mejor edge combinado real -- nunca
+        elige buscando "llegar a x2/x3", solo el mejor edge honesto.
+        Si no hay al menos 2 patas, o ninguna combinacion tiene valor
+        real, tambien lo dice claramente -- nunca fuerza un parlay.
         """
-        pierna_futbol = self.leer_pick_de_hoy("FUTBOL")
-        pierna_nba = self.leer_pick_de_hoy("NBA")
+        patas_disponibles = {}
+        for deporte in DEPORTES_PARLAY:
+            pick = self.leer_pick_de_hoy(deporte)
+            if pick:
+                patas_disponibles[deporte] = pick
 
-        if not pierna_futbol or not pierna_nba:
-            faltantes = []
-            if not pierna_futbol:
-                faltantes.append("Futbol")
-            if not pierna_nba:
-                faltantes.append("NBA")
+        if len(patas_disponibles) < 2:
             self.send_msg(
-                f"📭 *PARLAY*: hoy no hay pick individual disponible de "
-                f"{' y '.join(faltantes)}, asi que no hay 2 patas que combinar. "
-                f"Sin parlay hoy — es preferible eso a forzar una combinacion sin base."
+                f"📭 *PARLAY*: hoy solo hay {len(patas_disponibles)} pick(s) individual(es) "
+                f"disponible(s) entre {', '.join(DEPORTES_PARLAY)} — se necesitan al menos 2 "
+                f"para combinar. Sin parlay hoy — es preferible eso a forzar una combinacion sin base."
             )
             return
 
-        try:
-            prob1 = float(pierna_futbol["prob_justa_pct"]) / 100
-            cuota1 = float(pierna_futbol["cuota"])
-            prob2 = float(pierna_nba["prob_justa_pct"]) / 100
-            cuota2 = float(pierna_nba["cuota"])
-        except (KeyError, ValueError):
-            return
+        # Evaluamos TODAS las combinaciones de 2 patas posibles y nos
+        # quedamos con la de mejor edge real (nunca la mas cercana a x2)
+        mejor_combo = None
+        for (deporte_a, pierna_a), (deporte_b, pierna_b) in combinations(patas_disponibles.items(), 2):
+            try:
+                prob_a = float(pierna_a["prob_justa_pct"]) / 100
+                cuota_a = float(pierna_a["cuota"])
+                prob_b = float(pierna_b["prob_justa_pct"]) / 100
+                cuota_b = float(pierna_b["cuota"])
+            except (KeyError, ValueError):
+                continue
 
-        # Probabilidad combinada real (asumiendo independencia entre los
-        # dos eventos -- razonable porque son deportes y partidos distintos)
-        prob_combinada = prob1 * prob2
+            prob_combinada = prob_a * prob_b
+            cuota_combinada = cuota_a * cuota_b
+            edge_parlay = (cuota_combinada * prob_combinada) - 1
 
-        # Cuota combinada ESTIMADA por multiplicacion simple. Aviso real:
-        # muchas casas aplican un margen extra en parlays por encima de
-        # esto, asi que la cuota que te ofrezca tu casa puede ser un poco
-        # menor -- este numero es un techo, no una promesa.
-        cuota_combinada_estimada = cuota1 * cuota2
+            combo = {
+                "deporte_a": deporte_a, "pierna_a": pierna_a, "cuota_a": cuota_a,
+                "deporte_b": deporte_b, "pierna_b": pierna_b, "cuota_b": cuota_b,
+                "prob_combinada": prob_combinada, "cuota_combinada": cuota_combinada,
+                "edge": edge_parlay,
+            }
+            if mejor_combo is None or edge_parlay > mejor_combo["edge"]:
+                mejor_combo = combo
 
-        edge_parlay = (cuota_combinada_estimada * prob_combinada) - 1
+        emojis = {"FUTBOL": "⚽", "NBA": "🏀", "NFL": "🏈"}
+        e1 = emojis.get(mejor_combo["deporte_a"], "🔹")
+        e2 = emojis.get(mejor_combo["deporte_b"], "🔹")
 
         mensaje_base = (
             f"🎲 *PARLAY DE 2 PATAS - ANALISIS DE HOY*\n\n"
-            f"1️⃣ ⚽ {pierna_futbol['evento']} — {pierna_futbol['resultado']} @ {cuota1:.2f}\n"
-            f"2️⃣ 🏀 {pierna_nba['evento']} — {pierna_nba['resultado']} @ {cuota2:.2f}\n\n"
-            f"📐 Probabilidad combinada real (ambas patas): {prob_combinada*100:.1f}%\n"
-            f"🏦 Cuota combinada estimada: {cuota_combinada_estimada:.2f} "
+            f"1️⃣ {e1} {mejor_combo['pierna_a']['evento']} — {mejor_combo['pierna_a']['resultado']} @ {mejor_combo['cuota_a']:.2f}\n"
+            f"2️⃣ {e2} {mejor_combo['pierna_b']['evento']} — {mejor_combo['pierna_b']['resultado']} @ {mejor_combo['cuota_b']:.2f}\n\n"
+            f"📐 Probabilidad combinada real (ambas patas): {mejor_combo['prob_combinada']*100:.1f}%\n"
+            f"🏦 Cuota combinada estimada: {mejor_combo['cuota_combinada']:.2f} "
             f"(techo — tu casa puede pagar un poco menos por margen de parlay)\n"
         )
 
-        if edge_parlay >= EDGE_MINIMO_PARLAY:
+        if mejor_combo["edge"] >= EDGE_MINIMO_PARLAY:
             monto_parlay = self.bankroll * MAX_PORCENTAJE_BANKROLL  # tope fijo, sin Kelly compuesto aqui
             mensaje = mensaje_base + (
-                f"📈 Edge estimado del parlay: {edge_parlay*100:.1f}%\n"
+                f"📈 Edge estimado del parlay: {mejor_combo['edge']*100:.1f}%\n"
                 f"💰 Si decides jugarlo, no mas de {MAX_PORCENTAJE_BANKROLL*100:.0f}% del bankroll "
                 f"≈ ${monto_parlay:.2f}\n\n"
                 f"⚠️ IMPORTANTE: esto es una ALTERNATIVA a jugar las 2 patas por separado, "
@@ -547,11 +589,14 @@ class NexusSportsValue:
                 f"La varianza de un parlay es mucho mayor que la de picks individuales, "
                 f"aun cuando el edge calculado sea positivo."
             )
-            self.registrar_parlay_csv(pierna_futbol, pierna_nba, cuota1, cuota2, prob_combinada, cuota_combinada_estimada, edge_parlay)
+            self.registrar_parlay_csv(
+                mejor_combo["pierna_a"], mejor_combo["pierna_b"], mejor_combo["cuota_a"], mejor_combo["cuota_b"],
+                mejor_combo["prob_combinada"], mejor_combo["cuota_combinada"], mejor_combo["edge"]
+            )
             self.actualizar_json_parlay_web()
         else:
             mensaje = mensaje_base + (
-                f"📈 Edge estimado del parlay: {edge_parlay*100:.1f}% (por debajo del "
+                f"📈 Edge estimado del parlay: {mejor_combo['edge']*100:.1f}% (por debajo del "
                 f"{EDGE_MINIMO_PARLAY*100:.0f}% minimo)\n\n"
                 f"🙅 No conviene combinarlas hoy. Cada pata individual ya tenia valor por "
                 f"separado — quedate con esas por separado en vez de combinarlas."
@@ -608,6 +653,41 @@ class NexusSportsValue:
             self.evaluar_parlay_del_dia()
             self.parlay_enviado_hoy = True
 
+    def diagnosticar_sports_disponibles(self):
+        """
+        Consulta el endpoint real /v4/sports de tu API para ver EXACTAMENTE
+        que claves de deporte estan disponibles en tu plan ahora mismo, en
+        vez de adivinar. Manda el resultado por Telegram (filtrado a lo
+        relevante: tenis, futbol, football americano) para no saturar.
+        """
+        url = f"https://api.the-odds-api.com/v4/sports/?apiKey={self.api_key}"
+        try:
+            resp = requests.get(url, timeout=10)
+            datos = resp.json()
+        except Exception as e:
+            self.send_msg(f"⚠️ DIAGNOSTICO: error consultando /v4/sports: {e}")
+            return
+
+        if resp.status_code != 200 or not isinstance(datos, list):
+            self.send_msg(f"⚠️ DIAGNOSTICO: la API respondio codigo {resp.status_code}. Respuesta: {str(datos)[:300]}")
+            return
+
+        relevantes = [
+            d for d in datos
+            if any(palabra in d.get("key", "").lower() or palabra in d.get("group", "").lower()
+                   for palabra in ["tennis", "soccer", "football", "hockey", "basketball"])
+        ]
+
+        lineas = [f"🔍 *DIAGNOSTICO*: {len(datos)} deportes totales en tu plan. Relevantes:\n"]
+        for d in relevantes:
+            activo = "✅" if d.get("active") else "⏸️"
+            lineas.append(f"{activo} `{d.get('key')}` — {d.get('title')} ({d.get('group')})")
+
+        mensaje = "\n".join(lineas)
+        # Telegram tiene limite de ~4096 caracteres por mensaje
+        for i in range(0, len(mensaje), 3800):
+            self.send_msg(mensaje[i:i+3800])
+
     def ejecutar_una_vez(self, deporte=None):
         """
         Modo para ejecucion programada (ej: GitHub Actions cron).
@@ -620,6 +700,8 @@ class NexusSportsValue:
             deporte = deporte.upper()
             if deporte == "PARLAY":
                 self.evaluar_parlay_del_dia()
+            elif deporte == "SPORTS":
+                self.diagnosticar_sports_disponibles()
             elif deporte in DEPORTES:
                 self.escanear_deporte(deporte)
             else:
@@ -635,7 +717,7 @@ class NexusSportsValue:
             "Compara cuotas reales entre casas y solo avisa si hay valor estadistico genuino.\n"
             "Si un deporte no tiene edge ese dia, no se envia nada — es lo esperado, no un error.\n\n"
             "Horarios:\n"
-            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏒 15:30 Hockey\n🏀 16:00 NBA\n🎲 16:10 Analisis de parlay (Futbol+NBA, si aplica)\n\n"
+            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏈 09:00 NFL\n🏒 15:30 Hockey\n🏀 16:00 NBA\n🎲 16:10 Analisis de parlay (mejor combo entre Futbol/NBA/NFL, si aplica)\n\n"
             "Comandos: STATUS (estado actual) | LOG (resumen de tu historial de picks)"
         )
         while True:
