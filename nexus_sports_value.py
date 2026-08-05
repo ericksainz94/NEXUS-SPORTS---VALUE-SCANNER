@@ -149,7 +149,16 @@ class NexusSportsValue:
     def send_msg(self, text):
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
         try:
-            requests.post(url, json={"chat_id": self.chat_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
+            resp = requests.post(url, json={"chat_id": self.chat_id, "text": text, "parse_mode": "Markdown"}, timeout=10)
+            if not resp.ok:
+                # Telegram rechazo el mensaje (ej: Markdown mal formado por
+                # un guion bajo o asterisco sin pareja en texto dinamico).
+                # Reintentamos UNA vez sin formato para que el mensaje si
+                # llegue, y dejamos rastro del error original en los logs.
+                print(f"Telegram rechazo el mensaje (HTTP {resp.status_code}): {resp.text[:300]}")
+                resp2 = requests.post(url, json={"chat_id": self.chat_id, "text": text}, timeout=10)
+                if not resp2.ok:
+                    print(f"Reintento sin Markdown TAMBIEN fallo (HTTP {resp2.status_code}): {resp2.text[:300]}")
         except Exception as e:
             print(f"Error enviando mensaje: {e}")
 
@@ -371,7 +380,7 @@ class NexusSportsValue:
             datos.extend(datos_liga)
 
         if not datos:
-            detalle = f" (fallaron: {', '.join(ligas_con_error)})" if ligas_con_error else ""
+            detalle = f" (fallaron: `{', '.join(ligas_con_error)}`)" if ligas_con_error else ""
             self.send_msg(f"📭 {config['emoji']} {deporte}: no hay eventos disponibles ahorita{detalle}.")
             return None
 
