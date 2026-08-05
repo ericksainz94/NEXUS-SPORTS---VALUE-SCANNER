@@ -116,12 +116,17 @@ DEPORTES = {
         ],
         "market": "totals", "hora": "07:30", "emoji": "⚽",
     },
-    # OJO: "tennis_atp" es un valor PENDIENTE de confirmar -- corre
-    # "python nexus_sports_value.py once SPORTS" para ver la clave real
-    # que tu plan de API soporta, y actualiza esto si es distinta.
-    "TENIS":   {"sport_key": "tennis_atp",        "market": "h2h",     "hora": "08:00", "emoji": "🎾"},
+    # Tenis usa deteccion automatica de torneo activo (ver
+    # obtener_claves_tenis_activas) porque la clave real cambia cada
+    # semana segun el torneo en curso -- no hay una clave fija que sirva
+    # siempre.
+    "TENIS":   {"sport_key": "AUTO_TENNIS",        "market": "h2h",     "hora": "08:00", "emoji": "🎾"},
     "HOCKEY":  {"sport_key": "icehockey_nhl",     "market": "totals",  "hora": "15:30", "emoji": "🏒"},
     "NBA":     {"sport_key": "basketball_nba",    "market": "totals",  "hora": "16:00", "emoji": "🏀"},
+    # WNBA: activa ahora mismo (agosto), mientras NBA esta en receso hasta
+    # octubre. Corre poco despues de NBA para que el parlay (16:15) ya
+    # tenga ambas patas de basquetbol disponibles si aplican.
+    "WNBA":    {"sport_key": "basketball_wnba",   "market": "totals",  "hora": "16:05", "emoji": "🏀"},
     # NFL: la temporada arranca pronto. "spreads" (linea de puntos) es el
     # mercado estandar de NFL, mas liquido que h2h para la mayoria de partidos.
     "NFL":     {"sport_key": "americanfootball_nfl", "market": "spreads", "hora": "09:00", "emoji": "🏈"},
@@ -129,7 +134,7 @@ DEPORTES = {
 
 # Deportes que SI pueden combinarse en el parlay de 2 patas (ver
 # evaluar_parlay_del_dia). Tenis y Hockey quedan fuera deliberadamente.
-DEPORTES_PARLAY = ["FUTBOL", "NBA", "NFL"]
+DEPORTES_PARLAY = ["FUTBOL", "NBA", "WNBA", "NFL"]
 
 
 class NexusSportsValue:
@@ -356,6 +361,14 @@ class NexusSportsValue:
         sport_keys = config["sport_key"]
         if isinstance(sport_keys, str):
             sport_keys = [sport_keys]
+        if sport_keys == ["AUTO_TENNIS"]:
+            sport_keys = self.obtener_claves_tenis_activas()
+            if not sport_keys:
+                self.send_msg(
+                    f"{config['emoji']} {deporte}: no hay ningun torneo de tenis activo "
+                    f"en la API ahorita (los torneos cambian semana a semana)."
+                )
+                return None
         market_key = config["market"]
 
         # Juntamos los eventos de TODAS las ligas configuradas para este
@@ -573,7 +586,7 @@ class NexusSportsValue:
             if mejor_combo is None or edge_parlay > mejor_combo["edge"]:
                 mejor_combo = combo
 
-        emojis = {"FUTBOL": "⚽", "NBA": "🏀", "NFL": "🏈"}
+        emojis = {"FUTBOL": "⚽", "NBA": "🏀", "WNBA": "🏀", "NFL": "🏈"}
         e1 = emojis.get(mejor_combo["deporte_a"], "🔹")
         e2 = emojis.get(mejor_combo["deporte_b"], "🔹")
 
@@ -662,6 +675,27 @@ class NexusSportsValue:
             self.evaluar_parlay_del_dia()
             self.parlay_enviado_hoy = True
 
+    def obtener_claves_tenis_activas(self):
+        """
+        Tenis no tiene una clave fija como 'tennis_atp' -- la API usa una
+        clave POR TORNEO (ej: tennis_atp_canadian_open) que cambia semana
+        a semana segun que torneo este en curso. En vez de hardcodear una
+        que se vuelve obsoleta, preguntamos a la API cuales estan activas
+        AHORA MISMO cada vez que escaneamos tenis.
+        """
+        url = f"https://api.the-odds-api.com/v4/sports/?apiKey={self.api_key}"
+        try:
+            resp = requests.get(url, timeout=10)
+            datos = resp.json()
+        except Exception:
+            return []
+        if resp.status_code != 200 or not isinstance(datos, list):
+            return []
+        return [
+            d["key"] for d in datos
+            if d.get("active") and "tennis" in d.get("key", "").lower()
+        ]
+
     def diagnosticar_sports_disponibles(self):
         """
         Consulta el endpoint real /v4/sports de tu API para ver EXACTAMENTE
@@ -726,7 +760,7 @@ class NexusSportsValue:
             "Compara cuotas reales entre casas y solo avisa si hay valor estadistico genuino.\n"
             "Si un deporte no tiene edge ese dia, no se envia nada — es lo esperado, no un error.\n\n"
             "Horarios:\n"
-            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏈 09:00 NFL\n🏒 15:30 Hockey\n🏀 16:00 NBA\n🎲 16:10 Analisis de parlay (mejor combo entre Futbol/NBA/NFL, si aplica)\n\n"
+            "⚽ 07:30 Futbol\n🎾 08:00 Tenis\n🏈 09:00 NFL\n🏒 15:30 Hockey\n🏀 16:00 NBA\n🏀 16:05 WNBA\n🎲 16:15 Analisis de parlay (mejor combo entre Futbol/NBA/WNBA/NFL, si aplica)\n\n"
             "Comandos: STATUS (estado actual) | LOG (resumen de tu historial de picks)"
         )
         while True:
